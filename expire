@@ -1,0 +1,31 @@
+#!/bin/bash
+
+set -euo pipefail
+
+die() {
+  >&2 echo $1 
+  exit 1
+}
+
+[[ -n "$1" ]] || die "no path to key folder"
+[[ -d "$1" ]] || die "can't read folder at $1"
+
+public="$1/public.asc"
+secret="$1/secret.asc"
+secret_subs="$1/secret-subs.asc"
+
+[[ -f "$secret" ]] || die "can't read secret key @ $secret"
+
+kbx=$(mktemp --directory --suffix '.kbx')
+finish() {
+  rm -r "$kbx"
+}
+trap finish EXIT
+
+gpg2 --homedir "$kbx" --import "$secret"
+fpr=$(gpg2 --homedir "$kbx" --with-colons -k | grep fpr | head -n1 | cut -d':' -f10)
+gpg2 --homedir "$kbx" --quick-set-expire $fpr 1y
+gpg2 --homedir "$kbx" --quick-set-expire $fpr 1y '*'
+gpg2 --homedir "$kbx" --armor --export-secret-keys $fpr >"$secret"
+gpg2 --homedir "$kbx" --armor --export-secret-subkeys $fpr >"$secret_subs"
+gpg2 --homedir "$kbx" --armor --export $fpr >"$public"
