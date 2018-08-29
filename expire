@@ -21,11 +21,105 @@ finish() {
   rm -r "$kbx"
 }
 trap finish EXIT
+chmod 700 "$kbx"
+export GNUPGHOME="$kbx"
 
-gpg2 --homedir "$kbx" --import "$secret"
-fpr=$(gpg2 --homedir "$kbx" --with-colons -k | grep fpr | head -n1 | cut -d':' -f10)
-gpg2 --homedir "$kbx" --quick-set-expire $fpr 1y
-gpg2 --homedir "$kbx" --quick-set-expire $fpr 1y '*'
-gpg2 --homedir "$kbx" --armor --export-secret-keys $fpr >"$secret"
-gpg2 --homedir "$kbx" --armor --export-secret-subkeys $fpr >"$secret_subs"
-gpg2 --homedir "$kbx" --armor --export $fpr >"$public"
+gpg2 --import "$secret"
+
+declare -a keys
+state=''
+expired=''
+caps=''
+slot=1
+while read -r line; do
+  typ=$(echo $line | cut -d: -f1)
+  case $typ in
+    tru|uid)
+      ;;
+    pub)
+      if [[ "$state" -eq '' ]]; then
+        state='pub'
+        expired=$(echo $line | cut -d: -f2)
+        expires_on=$(echo $line | cut -d: -f7 | xargs -n1 -I'{}' date --date="@{}" +%F)
+      else
+        die "invalid state transition from $state -> pub"
+      fi
+      ;;
+    sub)
+      if [[ "$state" = '' ]]; then
+        state='sub'
+        expired=$(echo $line | cut -d: -f2)
+        expires_on=$(echo $line | cut -d: -f7 | xargs -n1 -I'{}' date --date="@{}" +%F)
+        caps=$(echo $line | cut -d: -f12 | tr '[:lower:]' '[:upper:]')
+      else
+        die "invalid state transition from $state -> sub"
+      fi
+      ;;
+    fpr)
+      case $state in
+        pub|sub)
+          fpr=$(echo $line | cut -d: -f10)
+          if [[ "$state" = 'pub' ]]; then
+            prefix='[0:pub]'
+            idx=0
+          else
+            prefix="[$slot:sub]"
+            idx=$slot
+            slot=$((slot + 1))
+          fi
+          display="$prefix ${fpr: -16:16} [expires: $expires_on]"
+          if [[ -n "$caps" ]]; then
+            display="$display [$caps]"
+          fi
+          if [[ "$expired" = 'e' ]]; then
+            display="$display [expired]"
+          fi
+          echo $display
+          keys[$idx]=$fpr
+          state=''
+          caps=''
+          ;;
+        *)
+          die "unrecognised sequence (state:$state)"
+          ;;
+      esac
+      ;;
+    *)
+      die "unrecognised sequence (state:$state)"
+  esac
+done < <(gpg --with-colons -k)
+
+[[ -z "${keys[0]}" ]] && die "No primary key found"
+
+IFS=' ' read -r -p "Which keys would you like to adjust: " -a adjust
+read -r -p "What expiry would you like to assign: " date
+
+# Collect arguments.
+fprs=''
+for i in ${adjust[@]}; do
+  if [[ "$i" -eq 0 ]]; then
+    gpg2 --quick-set-expire "${keys[0]}" "$date"
+  else
+    fprs="$fprs ${keys[$i]}"
+  fi
+done
+
+# If we have subkey fingerprints lets adjust those.
+if [[ -n "$fprs" ]]; then
+  gpg2 --quick-set-expire "${keys[0]}" $date $fprs 
+fi
+
+# Print keychain so that we can check that we like it.
+gpg2 -k
+
+read -p "Do you want to save this keyring? [y/N]: " save
+
+if [[ "$save" = '' ]] || [[ "$save" =~ n|N ]]; then
+  exit 0
+elif [[ "$save" =~ y|Y ]]; then
+  gpg2 --armor --export-secret-keys "$fpr" >"$secret"
+  gpg2 --armor --export-secret-subkeys "$fpr" >"$secret_subs"
+  gpg2 --armor --export "$fpr" >"$public"
+else
+  die "input '$save' not recognised"
+fi
