@@ -21,11 +21,80 @@ finish() {
   rm -r "$kbx"
 }
 trap finish EXIT
+chmod 700 "$kbx"
+export GNUPGHOME="$kbx"
 
-gpg2 --homedir "$kbx" --import "$secret"
-fpr=$(gpg2 --homedir "$kbx" --with-colons -k | grep fpr | head -n1 | cut -d':' -f10)
-gpg2 --homedir "$kbx" --quick-set-expire $fpr 1y
-gpg2 --homedir "$kbx" --quick-set-expire $fpr 1y '*'
-gpg2 --homedir "$kbx" --armor --export-secret-keys $fpr >"$secret"
-gpg2 --homedir "$kbx" --armor --export-secret-subkeys $fpr >"$secret_subs"
-gpg2 --homedir "$kbx" --armor --export $fpr >"$public"
+gpg2 --import "$secret"
+fpr=$(gpg2 --with-colons -k | grep fpr | head -n1 | cut -d':' -f10)
+
+keys=()
+
+state=''
+expired=''
+caps=''
+slot=1
+gpg --with-colons -k | while read -r line; do
+  typ=$(echo $line | cut -d: -f1)
+  case $typ in
+    tru|uid)
+      ;;
+    pub)
+      if [[ "$state" -eq '' ]]; then
+        state='pub'
+        expired=$(echo $line | cut -d: -f2)
+        expires_on=$(echo $line | cut -d: -f7 | xargs -n1 -I'{}' date --date="@{}" +%F)
+      else
+        die "invalid state transition from $state -> pub"
+      fi
+      ;;
+    sub)
+      if [[ "$state" = '' ]]; then
+        state='sub'
+        expired=$(echo $line | cut -d: -f2)
+        expires_on=$(echo $line | cut -d: -f7 | xargs -n1 -I'{}' date --date="@{}" +%F)
+        caps=$(echo $line | cut -d: -f12 | tr '[:lower:]' '[:upper:]')
+      else
+        die "invalid state transition from $state -> sub"
+      fi
+      ;;
+    fpr)
+      case $state in
+        pub|sub)
+          fpr=$(echo $line | cut -d: -f10)
+          if [[ "$state" = 'pub' ]]; then
+            prefix='[0:pub]'
+            idx=0
+          else
+            prefix="[$slot:sub]"
+            idx=$slot
+            slot=$((slot + 1))
+          fi
+          display="$prefix ${fpr: -16:16} [expires: $expires_on]"
+          if [[ -n "$caps" ]]; then
+            display="$display [$caps]"
+          fi
+          if [[ "$expired" = 'e' ]]; then
+            display="$display [expired]"
+          fi
+          echo $display
+          keys[$idx]="$fpr"
+          state=''
+          caps=''
+          ;;
+        *)
+          die "unrecognised sequence (state:$state)"
+          ;;
+      esac
+      ;;
+    *)
+      die "unrecognised sequence (state:$state)"
+  esac
+done
+
+read -p "which keys would you like to adjust: " adjust
+
+# gpg2 --quick-set-expire "$fpr" 1y
+# gpg2 --quick-set-expire "$fpr" 1y '*'
+# gpg2 --armor --export-secret-keys "$fpr" >"$secret"
+# gpg2 --armor --export-secret-subkeys "$fpr" >"$secret_subs"
+# gpg2 --armor --export "$fpr" >"$public"
